@@ -347,8 +347,20 @@ body{font-family:'Exo 2',sans-serif;background:var(--bg);color:var(--text);min-h
   <div class="main">
     <div class="scalp-alert" id="scalpAlert">
       <div class="scalp-icon">⚡</div>
-      <div class="scalp-text"><h3>NEXUS SCALP ENGINE ACTIVE</h3><p id="alertSubtxt">Loading signals — fetching live WEEX candle data...</p></div>
-      <div class="scalp-counter"><span id="scalpCount">—</span><span>SIGNALS</span></div>
+      <div class="scalp-text">
+        <h3>NEXUS SCALP ENGINE — 15M LIVE</h3>
+        <p id="alertSubtxt">Loading signals — fetching 15-minute candle data...</p>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap">
+          <span style="font-family:'Space Mono',monospace;font-size:8px;color:var(--dim);letter-spacing:1px">AUTO-REFRESH IN:</span>
+          <span id="refreshCountdown" style="font-family:'Oxanium',monospace;font-size:11px;font-weight:700;color:var(--cyan)">5:00</span>
+          <span style="font-family:'Space Mono',monospace;font-size:8px;color:var(--dim)">|</span>
+          <span id="lastRefreshTime" style="font-family:'Space Mono',monospace;font-size:8px;color:var(--dim)">—</span>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+        <div class="scalp-counter"><span id="scalpCount">—</span><span>SIGNALS</span></div>
+        <button id="refreshBtn" onclick="manualRefresh()" style="padding:6px 12px;background:linear-gradient(135deg,rgba(0,153,85,0.8),rgba(0,230,136,0.8));border:none;border-radius:7px;color:#000;font-family:'Oxanium',monospace;font-size:9px;font-weight:800;letter-spacing:2px;cursor:pointer;white-space:nowrap;transition:all 0.2s">⚡ REFRESH</button>
+      </div>
     </div>
     <div class="notif-prompt" id="notifPrompt" style="display:none;margin-top:10px">
       <div class="notif-txt">🔔 Get <span>instant alerts</span> at each session: 00:00 · 08:00 · 13:30 UTC</div>
@@ -530,7 +542,8 @@ function updateTsUI(){const el=document.getElementById('priceTs');if(!el||!price
 
 // ══ CANDLE DATA ══
 const candleCache={};
-async function fetchCandles(pair,interval='60',limit=100){const key=pair+'_'+interval;if(candleCache[key]&&Date.now()-candleCache[key].ts<240000)return candleCache[key].data;try{const r=await fetch(`https://api.bybit.com/v5/market/kline?category=spot&symbol=${pair}&interval=${interval}&limit=${limit}`,{signal:AbortSignal.timeout(6000)});if(!r.ok)return null;const d=await r.json();if(d?.retCode!==0||!d.result?.list?.length)return null;const candles=d.result.list.slice().reverse().map(c=>({t:parseInt(c[0]),o:parseFloat(c[1]),h:parseFloat(c[2]),l:parseFloat(c[3]),c:parseFloat(c[4]),v:parseFloat(c[5])}));if(candles.length<30)return null;candleCache[key]={data:candles,ts:Date.now()};return candles;}catch{return null;}}
+async function fetchCandles(pair,interval='15',limit=120){const key=pair+'_'+interval;if(candleCache[key]&&Date.now()-candleCache[key].ts<240000)return candleCache[key].data;try{const r=await fetch(`https://api.bybit.com/v5/market/kline?category=spot&symbol=${pair}&interval=${interval}&limit=${limit}`,{signal:AbortSignal.timeout(8000)});if(!r.ok)return null;const d=await r.json();if(d?.retCode!==0||!d.result?.list?.length)return null;const candles=d.result.list.slice().reverse().map(c=>({t:parseInt(c[0]),o:parseFloat(c[1]),h:parseFloat(c[2]),l:parseFloat(c[3]),c:parseFloat(c[4]),v:parseFloat(c[5])}));if(candles.length<30)return null;candleCache[key]={data:candles,ts:Date.now()};return candles;}catch{return null;}}
+function bustCandleCache(){Object.keys(candleCache).forEach(k=>delete candleCache[k]);}
 
 // ══ TA ENGINE ══
 function calcEMA(closes,period){if(closes.length<period)return null;const k=2/(period+1);let ema=closes.slice(0,period).reduce((a,b)=>a+b,0)/period;for(let i=period;i<closes.length;i++)ema=closes[i]*k+ema*(1-k);return ema;}
@@ -542,7 +555,7 @@ function calcATR(highs,lows,closes,period=14){if(closes.length<period+1)return n
 function calcStoch(highs,lows,closes,kp=14){if(closes.length<kp)return null;const h=Math.max(...highs.slice(-kp)),l=Math.min(...lows.slice(-kp));return h===l?50:((closes[closes.length-1]-l)/(h-l))*100;}
 function calcVolRatio(volumes){if(volumes.length<10)return 1;const avg=volumes.slice(0,-1).reduce((a,b)=>a+b,0)/(volumes.length-1);return avg>0?volumes[volumes.length-1]/avg:1;}
 
-function computeTASignal(asset,price,change,candles,slot){
+function computeTASignal(asset,price,change,candles){
   const closes=candles.map(c=>c.c),highs=candles.map(c=>c.h),lows=candles.map(c=>c.l),volumes=candles.map(c=>c.v);
   const live=prices[asset.sym]||price;
   const ema9=calcEMA(closes,9),ema21=calcEMA(closes,21),ema50=calcEMA(closes,50);
@@ -565,8 +578,9 @@ function computeTASignal(asset,price,change,candles,slot){
   const dir=net>1.5?'buy':net<-1.5?'sell':'neutral';
   const agree=dir==='buy'?bullScore/(bullScore+bearScore||1):dir==='sell'?bearScore/(bullScore+bearScore||1):0.5;
   const confidence=Math.min(97,Math.max(44,Math.round(38+agree*54+Math.min(Math.abs(net),3)*2.5)));
-  const atrVal=atr||live*0.012;
-  const tpDist=atrVal*2.2,slDist=atrVal*1.1;
+  // Scalping: tight stops, quick targets
+  const atrVal=atr||live*0.008;
+  const tpDist=atrVal*1.5,slDist=atrVal*0.75;
   const entry=live,tp=dir==='buy'?entry+tpDist:entry-tpDist,sl=dir==='buy'?entry-slDist:entry+slDist;
   const rr=(tpDist/slDist).toFixed(1),pctMove=((tpDist/entry)*100).toFixed(2);
   const quality=confidence>=85?'ELITE':confidence>=70?'STRONG':'MODERATE';
@@ -574,32 +588,33 @@ function computeTASignal(asset,price,change,candles,slot){
   const indicators=[{color:dot('EMA 9/21'),name:'EMA'},{color:dot('RSI(14)'),name:'RSI'},{color:dot('MACD'),name:'MACD'},{color:dot('Volume'),name:'Vol'}];
   const reasons=dir==='buy'?indDetails.filter(d=>d.bull===true).slice(0,3).map(d=>d.note):dir==='sell'?indDetails.filter(d=>d.bull===false).slice(0,3).map(d=>d.note):[...indDetails.filter(d=>d.bull===true).slice(0,1).map(d=>d.note),...indDetails.filter(d=>d.bull===false).slice(0,1).map(d=>d.note)];
   const analysis=reasons.length?reasons.join('. ')+`. ATR(14)=${fmt(atrVal)} · RSI=${rsi?rsi.toFixed(1):'N/A'} · Vol=${volR.toFixed(1)}x avg.`:'Mixed indicator readings — await clearer confluence.';
-  return{asset,price:live,change,dir,entry,tp,sl,rr,pctMove,confidence,quality,analysis,indicators,indDetails,rsiVal:rsi,atrVal,macdVal:macd,sessionSlot:slot,time:new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' UTC',isTA:true};
+  return{asset,price:live,change,dir,entry,tp,sl,rr,pctMove,confidence,quality,analysis,indicators,indDetails,rsiVal:rsi,atrVal,macdVal:macd,sessionSlot:getTimeLabel(),time:new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' UTC',isTA:true};
 }
-function generateFallbackSignal(asset,price,change,slot){
+function generateFallbackSignal(asset,price,change){
   const live=prices[asset.sym]||price;
   const seed=asset.sym.split('').reduce((a,c)=>a+c.charCodeAt(0),0)+parseInt(slot.replace(/\D/g,'').slice(-8));
   const pseudo=((seed*1664525+1013904223)&0x7fffffff)/0x7fffffff;
+  const seed=asset.sym.split('').reduce((a,c)=>a+c.charCodeAt(0),0)+Math.floor(Date.now()/60000);
+  const pseudo=((seed*1664525+1013904223)&0x7fffffff)/0x7fffffff;
   const dir=change>2?'buy':change<-2?'sell':change>0.5&&pseudo>0.4?'buy':change<-0.5&&pseudo>0.4?'sell':pseudo>0.6?'buy':pseudo<0.3?'sell':'neutral';
   const confidence=Math.min(68,Math.max(44,Math.round(44+Math.abs(change)*3+pseudo*14)));
-  const atr=live*0.012,tp=dir==='buy'?live+atr*2.2:live-atr*2.2,sl=dir==='buy'?live-atr*1.1:live+atr*1.1;
+  const atr=live*0.008,tp=dir==='buy'?live+atr*1.5:live-atr*1.5,sl=dir==='buy'?live-atr*0.75:live+atr*0.75;
   const pctMove=((atr*2.2/live)*100).toFixed(2);
   const col=dir==='buy'?'#00e688':dir==='sell'?'#ff4466':'#ffcc00';
-  return{asset,price:live,change,dir,entry:live,tp,sl,rr:'2.0',pctMove,confidence,quality:'MODERATE',analysis:`Momentum signal based on 24h change (${change.toFixed(2)}%). Full candle TA resumes next session.`,indicators:[{color:col,name:'Trend'},{color:'#ffcc00',name:'RSI'},{color:'#ffcc00',name:'MACD'},{color:'#ffcc00',name:'Vol'}],indDetails:[],rsiVal:null,atrVal:atr,macdVal:null,sessionSlot:slot,time:new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' UTC',isTA:false};
+  return{asset,price:live,change,dir,entry:live,tp,sl,rr:'2.0',pctMove,confidence,quality:'MODERATE',analysis:`Momentum signal based on 24h change (${change.toFixed(2)}%). Full candle TA resumes next session.`,indicators:[{color:col,name:'Trend'},{color:'#ffcc00',name:'RSI'},{color:'#ffcc00',name:'MACD'},{color:'#ffcc00',name:'Vol'}],indDetails:[],rsiVal:null,atrVal:atr,macdVal:null,sessionSlot:getTimeLabel(),time:new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' UTC',isTA:false};
 }
-async function generateSignal(asset,candles){const price=prices[asset.sym]||asset.fallback,change=priceChanges[asset.sym]||0,slot=getSessionSlot();if(!candles||candles.length<30)return generateFallbackSignal(asset,price,change,slot);return computeTASignal(asset,price,change,candles,slot);}
+async function generateSignal(asset,candles){const price=prices[asset.sym]||asset.fallback,change=priceChanges[asset.sym]||0;if(!candles||candles.length<30)return generateFallbackSignal(asset,price,change);return computeTASignal(asset,price,change,candles);}
 
 // ══ FORMAT ══
 function fmt(n){if(!n&&n!==0)return'—';const a=Math.abs(n);if(a>=10000)return n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});if(a>=1000)return n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});if(a>=100)return n.toFixed(2);if(a>=10)return n.toFixed(3);if(a>=1)return n.toFixed(4);if(a>=0.1)return n.toFixed(5);return n.toFixed(6);}
 
 // ══ SESSION LOCK ══
-const LS_SIG='nexe_sigs_v1',LS_HIST='nexe_hist_v1';
-function getSessionSlot(){const now=new Date(),m=now.getUTCHours()*60+now.getUTCMinutes(),date=now.toISOString().slice(0,10);if(m>=13*60+30)return date+'-S2';if(m>=8*60)return date+'-S1';return date+'-S0';}
-function saveSigs(slot,sArr){try{const slim=sArr.map(s=>({assetSym:s.asset.sym,price:s.price,change:s.change,dir:s.dir,entry:s.entry,tp:s.tp,sl:s.sl,rr:s.rr,pctMove:s.pctMove,confidence:s.confidence,analysis:s.analysis,indicators:s.indicators,indDetails:s.indDetails||[],rsiVal:s.rsiVal,atrVal:s.atrVal,macdBull:s.macdVal?s.macdVal.hist>0:null,sessionSlot:s.sessionSlot,time:s.time,isTA:s.isTA,quality:s.quality}));localStorage.setItem(LS_SIG,JSON.stringify({slot,signals:slim,savedAt:Date.now()}));}catch(e){}}
-function loadSigs(slot){try{const raw=localStorage.getItem(LS_SIG);if(!raw)return null;const p=JSON.parse(raw);if(p.slot!==slot)return null;if(Date.now()-p.savedAt>8*3600*1000)return null;const out=p.signals.map(s=>{const asset=ASSETS.find(a=>a.sym===s.assetSym);return asset?{...s,asset}:null;}).filter(Boolean);return out.length===ASSETS.length?out:null;}catch{return null;}}
+// ── History only (no signal caching — signals always recompute) ──
+const LS_HIST='nexe_hist_v1';
+function getTimeLabel(){return new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'})+' UTC';}
 function loadHist(){try{return JSON.parse(localStorage.getItem(LS_HIST)||'[]');}catch{return[];}}
 function saveHist(h){try{localStorage.setItem(LS_HIST,JSON.stringify(h.slice(-200)));}catch{}}
-function recordHistory(sigs){const h=loadHist(),slot=getSessionSlot();if(h.length&&h[h.length-1].slot===slot)return;sigs.forEach(s=>h.push({slot,time:s.time,sym:s.asset.sym,dir:s.dir,entry:s.entry,tp:s.tp,sl:s.sl,rr:s.rr,conf:s.confidence,quality:s.quality||'—',status:'OPEN',savedAt:Date.now()}));saveHist(h);}
+function recordHistory(sigs){const h=loadHist(),ts=Date.now();sigs.forEach(s=>h.push({slot:getTimeLabel(),time:s.time,sym:s.asset.sym,dir:s.dir,entry:s.entry,tp:s.tp,sl:s.sl,rr:s.rr,conf:s.confidence,quality:s.quality||'—',status:'OPEN',savedAt:ts}));saveHist(h);}
 function updateHistStatuses(){const h=loadHist();let changed=false;h.forEach(r=>{if(r.status!=='OPEN')return;const p=prices[r.sym];if(!p)return;if(r.dir==='buy'){if(p>=r.tp){r.status='TP HIT';changed=true;}else if(p<=r.sl){r.status='SL HIT';changed=true;}}if(r.dir==='sell'){if(p<=r.tp){r.status='TP HIT';changed=true;}else if(p>=r.sl){r.status='SL HIT';changed=true;}}});if(changed)saveHist(h);return h;}
 function renderHistory(){const h=updateHistStatuses(),body=document.getElementById('historyBody');if(!h.length){body.innerHTML='<div class="ht-empty">No history yet — builds as sessions fire.</div>';return;}body.innerHTML=[...h].reverse().map(r=>{const dc=r.dir==='buy'?'var(--primary)':r.dir==='sell'?'var(--red)':'var(--gold)';const sc=r.status==='TP HIT'?'stp':r.status==='SL HIT'?'ssl':'sopen';return`<div class="ht-row"><div style="font-size:8px;color:var(--dim)">${r.time||r.slot.slice(-8)}</div><div style="color:var(--primary);font-weight:700">${r.sym}</div><div style="color:${dc};font-weight:700">${r.dir.toUpperCase()}</div><div>$${fmt(r.entry)}</div><div style="color:var(--primary)">$${fmt(r.tp)}</div><div style="color:var(--gold)">1:${r.rr}</div><div>${r.conf}%</div><div class="${sc}">${r.status}</div></div>`;}).join('');}
 function exportCSV(){const h=loadHist();if(!h.length){alert('No history to export yet.');return;}const rows=h.map(r=>`"${r.time||r.slot}","${r.sym}","${r.dir}","${r.entry}","${r.tp}","${r.sl}","1:${r.rr}","${r.conf}%","${r.status}"`);const blob=new Blob(['Time,Asset,Direction,Entry,TP,SL,RR,Confidence,Status\n'+rows.join('\n')],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`nexus-edge-${new Date().toISOString().slice(0,10)}.csv`;a.click();}
@@ -641,7 +656,7 @@ function renderSignals(){
   signalCount=Math.max(signalCount,1);
   document.getElementById('statSig').textContent=Math.min(signalCount,3);
   document.getElementById('scalpCount').textContent=signals.length;
-  document.getElementById('alertSubtxt').textContent=`${signals.length} scalp signals active — tap any card for full analysis`;
+  document.getElementById('alertSubtxt').textContent=`${signals.length} scalp signals — 15M candles — refreshes every 5 min`;
   document.getElementById('sentimentLabel').textContent=signals.length+' SIGNALS ACTIVE';
   const avgRR=(signals.reduce((a,s)=>a+parseFloat(s.rr),0)/signals.length).toFixed(1);
   const avgConf=Math.round(signals.reduce((a,s)=>a+s.confidence,0)/signals.length);
@@ -751,22 +766,40 @@ function updateCountdown(){
 
 // ══ SESSION FIRE ══
 let lastFired=-1;
-function checkSessionFire(){const now=new Date(),m=now.getUTCHours()*60+now.getUTCMinutes();SESSIONS.forEach((s,i)=>{const sm=s.hour*60+s.min;if(m>=sm&&m<sm+2&&lastFired!==i){lastFired=i;generateAllSignals(true).then(()=>{fireNotif(s.name);playChime();});signalCount++;}});if(m<2)lastFired=-1;}
+function checkSessionFire(){const now=new Date(),m=now.getUTCHours()*60+now.getUTCMinutes();SESSIONS.forEach((s,i)=>{const sm=s.hour*60+s.min;if(m>=sm&&m<sm+2&&lastFired!==i){lastFired=i;bustCandleCache();generateAllSignals(false).then(()=>{fireNotif(s.name);playChime();});signalCount++;}});if(m<2)lastFired=-1;}
 function fireNotif(name){if(!('Notification'in window)||Notification.permission!=='granted')return;const b=signals.filter(s=>s.dir==='buy').length,se=signals.filter(s=>s.dir==='sell').length;new Notification(`NEXUS EDGE — ${name}`,{body:`${signals.length} scalp signals: ${b} BUY · ${se} SELL`,tag:'nexe'});}
 function playChime(){try{const ac=new(window.AudioContext||window.webkitAudioContext)();[[440,0],[554,0.18],[659,0.36]].forEach(([f,t])=>{const o=ac.createOscillator(),g=ac.createGain();o.connect(g);g.connect(ac.destination);o.frequency.value=f;g.gain.setValueAtTime(0,ac.currentTime+t);g.gain.linearRampToValueAtTime(0.12,ac.currentTime+t+0.02);g.gain.exponentialRampToValueAtTime(0.001,ac.currentTime+t+0.4);o.start(ac.currentTime+t);o.stop(ac.currentTime+t+0.5);});}catch{}}
 function checkShowNotif(){if('Notification'in window&&Notification.permission==='default')document.getElementById('notifPrompt').style.display='flex';}
 async function requestNotif(){const p=await Notification.requestPermission();document.getElementById('notifPrompt').style.display='none';if(p==='granted')new Notification('NEXUS EDGE Alerts Active ⚡',{body:'Scalp alerts at 00:00 · 08:00 · 13:30 UTC'});}
 
 // ══ GENERATE ALL SIGNALS ══
-async function generateAllSignals(forceRefresh=false){
-  const slot=getSessionSlot();
-  if(!forceRefresh){const stored=loadSigs(slot);if(stored&&stored.length===ASSETS.length){signals=stored.map(s=>({...s,price:prices[s.asset?.sym]||s.price,change:priceChanges[s.asset?.sym]??s.change}));renderSignals();renderHeatmap();renderWatchlist();renderTicker();return;}}
-  document.getElementById('sentimentLabel').textContent='FETCHING CANDLE DATA...';
-  document.getElementById('signalsGrid').innerHTML=`<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--dim);font-family:'Space Mono',monospace;font-size:10px;letter-spacing:3px"><div style="font-size:28px;margin-bottom:12px;animation:pulse 1.2s infinite">⚡</div>COMPUTING SCALP SIGNALS<br><span style="color:var(--primary);font-size:8px;letter-spacing:2px">EMA · RSI · MACD · BOLLINGER · ATR · STOCHASTIC · VOLUME</span></div>`;
-  const candles=await Promise.all(ASSETS.map(a=>fetchCandles(a.pair,'60',100)));
+let isRefreshing=false;
+async function generateAllSignals(silent=false){
+  if(isRefreshing)return;
+  isRefreshing=true;
+  const btn=document.getElementById('refreshBtn');
+  if(btn){btn.textContent='⏳ LOADING...';btn.style.opacity='0.6';btn.disabled=true;}
+  if(!silent){
+    document.getElementById('sentimentLabel').textContent='FETCHING 15M CANDLES...';
+    document.getElementById('signalsGrid').innerHTML=`<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--dim);font-family:'Space Mono',monospace;font-size:10px;letter-spacing:3px"><div style="font-size:28px;margin-bottom:12px;animation:pulse 1.2s infinite">⚡</div>COMPUTING 15M SCALP SIGNALS<br><span style="color:var(--primary);font-size:8px;letter-spacing:2px">EMA · RSI · MACD · BOLLINGER · ATR · STOCHASTIC · VOLUME</span></div>`;
+  }
+  bustCandleCache();
+  await fetchAllPrices();
+  const candles=await Promise.all(ASSETS.map(a=>fetchCandles(a.pair,'15',120)));
   signals=await Promise.all(ASSETS.map((a,i)=>generateSignal(a,candles[i])));
-  saveSigs(slot,signals);recordHistory(signals);
+  recordHistory(signals);
   renderSignals();renderHeatmap();renderWatchlist();renderTicker();
+  // Update last refresh time
+  const now=new Date();
+  const lrt=document.getElementById('lastRefreshTime');
+  if(lrt)lrt.textContent='LAST: '+now.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',timeZone:'UTC'})+' UTC';
+  resetRefreshCountdown();
+  isRefreshing=false;
+  if(btn){btn.textContent='⚡ REFRESH';btn.style.opacity='1';btn.disabled=false;}
+}
+async function manualRefresh(){
+  bustCandleCache();
+  await generateAllSignals(false);
 }
 
 // ══ MATRIX PARTICLES ══
@@ -781,6 +814,26 @@ function initParticles(){
 // ══ KEYGEN TOOL ══
 async function generateLicenseKey(email,plan){const eh=hashEmail(email.toLowerCase());const fullSig=await hmacSHA256(HMAC_SECRET,`${plan}:${eh}`);return`NEXE-${plan}-${eh}-${fullSig.slice(0,16).toUpperCase()}`;}
 
+// ══ REFRESH COUNTDOWN ══
+let refreshSecondsLeft=300,refreshCountdownInterval=null;
+function startRefreshCountdown(){
+  refreshSecondsLeft=300;
+  if(refreshCountdownInterval)clearInterval(refreshCountdownInterval);
+  refreshCountdownInterval=setInterval(()=>{
+    refreshSecondsLeft=Math.max(0,refreshSecondsLeft-1);
+    const m=Math.floor(refreshSecondsLeft/60),s=refreshSecondsLeft%60;
+    const el=document.getElementById('refreshCountdown');
+    if(el)el.textContent=m+':'+String(s).padStart(2,'0');
+    if(refreshSecondsLeft<=10&&el){el.style.color='var(--red)';el.style.animation='pulse 0.5s infinite';}
+    else if(el){el.style.color='var(--cyan)';el.style.animation='';}
+  },1000);
+}
+function resetRefreshCountdown(){
+  refreshSecondsLeft=300;
+  if(refreshCountdownInterval)clearInterval(refreshCountdownInterval);
+  startRefreshCountdown();
+}
+
 // ══ BOOT ══
 async function initApp(){
   initParticles();
@@ -790,9 +843,13 @@ async function initApp(){
   signalCount=1;
   setInterval(updateCountdown,1000);
   setInterval(checkSessionFire,60000);
-  setInterval(async()=>{await fetchAllPrices();renderTicker();renderHeatmap();renderWatchlist();updateSentimentGauge();if(signals.length){signals=signals.map(s=>({...s,price:prices[s.asset?.sym]||s.price,change:priceChanges[s.asset?.sym]??s.change}));renderSignals();}updateHistStatuses();},30000);
+  // Price ticker updates every 15s
+  setInterval(async()=>{await fetchAllPrices();renderTicker();renderHeatmap();renderWatchlist();updateSentimentGauge();updateHistStatuses();updateTsUI();},15000);
+  // Full signal regeneration every 5 minutes (scalping)
+  setInterval(()=>generateAllSignals(true), 5*60*1000);
   setInterval(updateTsUI,10000);
-  setInterval(updateHistStatuses,300000);
+  setInterval(updateHistStatuses,60000);
+  startRefreshCountdown();
   updateCountdown();
   setTimeout(checkShowNotif,3000);
 }
