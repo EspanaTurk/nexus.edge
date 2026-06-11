@@ -503,14 +503,85 @@ body{font-family:'Exo 2',sans-serif;background:var(--bg);color:var(--text);min-h
   </div>
 </div>
 <script>
-// ══ LICENSE SYSTEM ══
-const HMAC_SECRET='NEXUS-EDGE-WEEX-2025-ZK7X';
-async function hmacSHA256(secret,message){const enc=new TextEncoder();const key=await crypto.subtle.importKey('raw',enc.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);const sig=await crypto.subtle.sign('HMAC',key,enc.encode(message));return Array.from(new Uint8Array(sig)).map(b=>b.toString(16).padStart(2,'0')).join('');}
-function hashEmail(email){let h=0;for(let i=0;i<email.length;i++)h=((h<<5)-h+email.charCodeAt(i))|0;return Math.abs(h).toString(16).padStart(8,'0').toUpperCase().slice(0,8);}
-async function validateLicense(email,key){const parts=key.split('-');if(parts.length!==4||parts[0]!=='NEXE')return null;const[,plan,emailHash,sigPart]=parts;if(!['MONTH','YEAR','LIFE'].includes(plan))return null;if(emailHash.toUpperCase()!==hashEmail(email.toLowerCase()).toUpperCase())return null;const fullSig=await hmacSHA256(HMAC_SECRET,`${plan}:${emailHash}`);if(sigPart.toUpperCase()!==fullSig.slice(0,16).toUpperCase())return null;return plan;}
-async function handleLogin(){const email=document.getElementById('loginEmail').value.trim(),key=document.getElementById('loginKey').value.trim(),errEl=document.getElementById('loginErr');if(!email||!key){errEl.style.display='block';return;}const plan=await validateLicense(email,key);if(!plan){errEl.style.display='block';return;}errEl.style.display='none';localStorage.setItem('nexe_session',JSON.stringify({email,plan,ts:Date.now()}));bootApp(email,plan);}
-function handleLogout(){localStorage.removeItem('nexe_session');document.getElementById('mainApp').style.display='none';document.getElementById('loginScreen').style.display='flex';}
-function bootApp(email,plan){document.getElementById('loginScreen').style.display='none';document.getElementById('mainApp').style.display='flex';const planMap={MONTH:'MONTHLY PRO',YEAR:'ANNUAL PRO',LIFE:'LIFETIME ELITE'};document.getElementById('planBadge').textContent=planMap[plan]||plan;initApp();}
+// ══ LICENSE SYSTEM — Pure JS (works on file://, http://, https://) ══
+const _S='NEXUS-EDGE-WEEX-2025-ZK7X';
+const _MK='NEXE-MASTER-ACCESS-2025';  // owner bypass key
+
+// Pure JS hash — no crypto.subtle needed, works everywhere
+function _h32(str){
+  let h1=0xdeadbeef,h2=0x41c6ce57;
+  for(let i=0;i<str.length;i++){
+    const c=str.charCodeAt(i);
+    h1=Math.imul(h1^c,2654435761);
+    h2=Math.imul(h2^c,1597334677);
+  }
+  h1=Math.imul(h1^(h1>>>16),2246822507)^Math.imul(h2^(h2>>>13),3266489909);
+  h2=Math.imul(h2^(h2>>>16),2246822507)^Math.imul(h1^(h1>>>13),3266489909);
+  return(4294967296*(2097151&h2)+(h1>>>0)).toString(16).toUpperCase().padStart(16,'0');
+}
+function hashEmail(email){
+  let h=0;
+  for(let i=0;i<email.length;i++)h=((h<<5)-h+email.charCodeAt(i))|0;
+  return Math.abs(h).toString(16).padStart(8,'0').toUpperCase().slice(0,8);
+}
+function _makeSig(plan,emailHash){
+  return _h32(_S+':'+plan+':'+emailHash+':'+_S).slice(0,16);
+}
+function validateLicense(email,rawKey){
+  // Strip whitespace, newlines, zero-width chars that copy-paste can introduce
+  const key=rawKey.replace(/[\s\u200B\u200C\u200D\uFEFF]/g,'').toUpperCase();
+  // Master bypass for owner
+  if(key===_MK.toUpperCase())return'LIFE';
+  const parts=key.split('-');
+  if(parts.length!==4)return null;
+  const[prefix,plan,emailHash,sigPart]=parts;
+  if(prefix!=='NEXE')return null;
+  if(!['MONTH','YEAR','LIFE'].includes(plan))return null;
+  const computedHash=hashEmail(email.toLowerCase().trim());
+  if(emailHash!==computedHash.toUpperCase())return null;
+  const expectedSig=_makeSig(plan,emailHash);
+  if(sigPart!==expectedSig)return null;
+  return plan;
+}
+function handleLogin(){
+  const email=document.getElementById('loginEmail').value.trim();
+  const rawKey=document.getElementById('loginKey').value;
+  const errEl=document.getElementById('loginErr');
+  errEl.style.display='none';
+  if(!email||!rawKey.trim()){
+    errEl.textContent='⚠ ENTER BOTH EMAIL AND LICENSE KEY';
+    errEl.style.display='block';return;
+  }
+  const plan=validateLicense(email,rawKey);
+  if(!plan){
+    // Give a helpful hint about what's wrong
+    const k=rawKey.replace(/[\s\u200B\u200C\u200D\uFEFF]/g,'').toUpperCase();
+    const parts=k.split('-');
+    let hint='⚠ INVALID KEY';
+    if(parts.length!==4)hint=`⚠ KEY FORMAT WRONG — GOT ${parts.length} PARTS, NEED 4 (NEXE-PLAN-HASH-SIG)`;
+    else if(parts[0]!=='NEXE')hint='⚠ KEY MUST START WITH NEXE-';
+    else if(!['MONTH','YEAR','LIFE'].includes(parts[1]))hint='⚠ PLAN MUST BE MONTH, YEAR, OR LIFE';
+    else if(parts[2]!==hashEmail(email.toLowerCase().trim()).toUpperCase())hint='⚠ KEY NOT VALID FOR THIS EMAIL — CHECK EMAIL MATCHES PURCHASE';
+    else hint='⚠ SIGNATURE INVALID — REGENERATE KEY WITH KEYGEN TOOL';
+    errEl.textContent=hint;
+    errEl.style.display='block';return;
+  }
+  errEl.style.display='none';
+  try{localStorage.setItem('nexe_session',JSON.stringify({email,plan,ts:Date.now()}));}catch(e){}
+  bootApp(email,plan);
+}
+function handleLogout(){
+  try{localStorage.removeItem('nexe_session');}catch(e){}
+  document.getElementById('mainApp').style.display='none';
+  document.getElementById('loginScreen').style.display='flex';
+}
+function bootApp(email,plan){
+  document.getElementById('loginScreen').style.display='none';
+  document.getElementById('mainApp').style.display='flex';
+  const planMap={MONTH:'MONTHLY PRO',YEAR:'ANNUAL PRO',LIFE:'LIFETIME ELITE'};
+  document.getElementById('planBadge').textContent=planMap[plan]||plan;
+  initApp();
+}
 
 // ══ ASSETS & SESSIONS ══
 const ASSETS=[
@@ -812,7 +883,7 @@ function initParticles(){
 }
 
 // ══ KEYGEN TOOL ══
-async function generateLicenseKey(email,plan){const eh=hashEmail(email.toLowerCase());const fullSig=await hmacSHA256(HMAC_SECRET,`${plan}:${eh}`);return`NEXE-${plan}-${eh}-${fullSig.slice(0,16).toUpperCase()}`;}
+function generateLicenseKey(email,plan){const eh=hashEmail(email.toLowerCase().trim());return'NEXE-'+plan+'-'+eh+'-'+_makeSig(plan,eh);}
 
 // ══ REFRESH COUNTDOWN ══
 let refreshSecondsLeft=300,refreshCountdownInterval=null;
