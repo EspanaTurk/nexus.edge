@@ -663,8 +663,6 @@ function computeTASignal(asset,price,change,candles){
 }
 function generateFallbackSignal(asset,price,change){
   const live=prices[asset.sym]||price;
-  const seed=asset.sym.split('').reduce((a,c)=>a+c.charCodeAt(0),0)+parseInt(slot.replace(/\D/g,'').slice(-8));
-  const pseudo=((seed*1664525+1013904223)&0x7fffffff)/0x7fffffff;
   const seed=asset.sym.split('').reduce((a,c)=>a+c.charCodeAt(0),0)+Math.floor(Date.now()/60000);
   const pseudo=((seed*1664525+1013904223)&0x7fffffff)/0x7fffffff;
   const dir=change>2?'buy':change<-2?'sell':change>0.5&&pseudo>0.4?'buy':change<-0.5&&pseudo>0.4?'sell':pseudo>0.6?'buy':pseudo<0.3?'sell':'neutral';
